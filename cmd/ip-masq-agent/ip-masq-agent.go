@@ -174,17 +174,17 @@ func (m *MasqDaemon) Run() {
 			defer time.Sleep(time.Duration(m.config.ResyncInterval))
 			// resync config
 			if err := m.osSyncConfig(); err != nil {
-				klog.Errorf("error syncing configuration: %v", err)
+				klog.Errorf("Error syncing configuration: %v", err)
 				return
 			}
 			// resync rules
 			if err := m.syncMasqRules(); err != nil {
-				klog.Errorf("error syncing masquerade rules: %v", err)
+				klog.Errorf("Error syncing masquerade rules: %v", err)
 				return
 			}
 			// resync ipv6 rules
 			if err := m.syncMasqRulesIPv6(); err != nil {
-				klog.Errorf("error syncing masquerade rules for ipv6: %v", err)
+				klog.Errorf("Error syncing masquerade rules for ipv6: %v", err)
 				return
 			}
 		}()
@@ -206,7 +206,7 @@ func (m *MasqDaemon) syncConfig(fs fakefs.FileSystem) error {
 	defer func() {
 		if err == nil {
 			json, _ := utiljson.Marshal(c)
-			klog.V(2).Infof("using config: %s", string(json))
+			klog.V(2).Infof("Using config: %s", string(json))
 		}
 	}()
 
@@ -218,10 +218,10 @@ func (m *MasqDaemon) syncConfig(fs fakefs.FileSystem) error {
 		m.config.MasqLinkLocal = c.MasqLinkLocal
 		m.config.MasqLinkLocalIPv6 = c.MasqLinkLocalIPv6
 		m.config.ResyncInterval = c.ResyncInterval
-		klog.V(2).Infof("no config file found at %q, using default values", configPath)
+		klog.V(2).Infof("No config file found at %q, using default values", configPath)
 		return nil
 	}
-	klog.V(2).Infof("config file found at %q", configPath)
+	klog.V(2).Infof("Config file found at %q", configPath)
 
 	// file exists, read and parse file
 	yaml, err := fs.ReadFile(configPath)
@@ -318,6 +318,7 @@ func (m *MasqDaemon) syncMasqRules() error {
 	writeMasqRules(lines, toPorts)
 
 	writeLine(lines, "COMMIT")
+	klog.V(2).Infof("IPv4 masquerading rules: %q", lines)
 
 	if err := m.iptables.RestoreAll(lines.Bytes(), utiliptables.NoFlushTables, utiliptables.NoRestoreCounters); err != nil {
 		return err
@@ -328,39 +329,43 @@ func (m *MasqDaemon) syncMasqRules() error {
 func (m *MasqDaemon) syncMasqRulesIPv6() error {
 	isIPv6Enabled := *enableIPv6
 
-	if isIPv6Enabled {
-		// make sure our custom chain for ipv6 non-masquerade exists
-		if _, err := m.ip6tables.EnsureChain(utiliptables.TableNAT, masqChain); err != nil {
-			return err
-		}
-		// ensure that any non-local in POSTROUTING jumps to masqChain
-		if err := m.ensurePostroutingJumpIPv6(); err != nil {
-			return err
-		}
-		// build up lines to pass to ip6tables-restore
-		lines6 := bytes.NewBuffer(nil)
-		writeLine(lines6, "*nat")
-		writeLine(lines6, utiliptables.MakeChainLine(masqChain)) // effectively flushes masqChain atomically with rule restore
+	if !isIPv6Enabled {
+		klog.V(2).Infof("IPv6 masquerading rules: not enabled")
+		return nil
+	}
 
-		// link-local IPv6 CIDR is non-masquerade by default
-		if !m.config.MasqLinkLocalIPv6 {
-			writeNonMasqRule(lines6, linkLocalCIDRIPv6)
+	// make sure our custom chain for ipv6 non-masquerade exists
+	if _, err := m.ip6tables.EnsureChain(utiliptables.TableNAT, masqChain); err != nil {
+		return err
+	}
+	// ensure that any non-local in POSTROUTING jumps to masqChain
+	if err := m.ensurePostroutingJumpIPv6(); err != nil {
+		return err
+	}
+	// build up lines to pass to ip6tables-restore
+	lines6 := bytes.NewBuffer(nil)
+	writeLine(lines6, "*nat")
+	writeLine(lines6, utiliptables.MakeChainLine(masqChain)) // effectively flushes masqChain atomically with rule restore
+
+	// link-local IPv6 CIDR is non-masquerade by default
+	if !m.config.MasqLinkLocalIPv6 {
+		writeNonMasqRule(lines6, linkLocalCIDRIPv6)
+	}
+
+	for _, cidr := range m.config.NonMasqueradeCIDRs {
+		if isIPv6CIDR(cidr) {
+			writeNonMasqRule(lines6, cidr)
 		}
+	}
 
-		for _, cidr := range m.config.NonMasqueradeCIDRs {
-			if isIPv6CIDR(cidr) {
-				writeNonMasqRule(lines6, cidr)
-			}
-		}
+	// masquerade all other traffic that is not bound for a --dst-type LOCAL destination
+	writeMasqRules(lines6, toPorts)
 
-		// masquerade all other traffic that is not bound for a --dst-type LOCAL destination
-		writeMasqRules(lines6, toPorts)
+	writeLine(lines6, "COMMIT")
+	klog.V(2).Infof("IPv6 masquerading rules: %q", lines6)
 
-		writeLine(lines6, "COMMIT")
-
-		if err := m.ip6tables.RestoreAll(lines6.Bytes(), utiliptables.NoFlushTables, utiliptables.NoRestoreCounters); err != nil {
-			return err
-		}
+	if err := m.ip6tables.RestoreAll(lines6.Bytes(), utiliptables.NoFlushTables, utiliptables.NoRestoreCounters); err != nil {
+		return err
 	}
 	return nil
 }
